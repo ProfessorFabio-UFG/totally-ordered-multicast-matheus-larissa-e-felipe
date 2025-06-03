@@ -34,12 +34,15 @@ def registerWithGroupManager(tcp_socket, udp_socket):
   clientSock = socket(AF_INET, SOCK_STREAM)
   print('Connecting to group manager: ', (GROUPMNGR_ADDR, GROUPMNGR_TCP_PORT))
   clientSock.connect((GROUPMNGR_ADDR, GROUPMNGR_TCP_PORT))
+  ipaddr = get_public_ip() if not DEV_MODE else "127.0.0.1"
+
   req = {
     "op": "register",
-    "ipaddr": get_public_ip(),
+    "ipaddr": ipaddr,
     "tcp_port": tcp_socket.getsockname()[1],
     "udp_port": udp_socket.getsockname()[1],
   }
+
   msg = pickle.dumps(req)
   print ('Registering with group manager: ', req)
   clientSock.send(msg)
@@ -163,10 +166,6 @@ def main():
     msgHandler = MsgHandler(udp_socket, my_self, len(peers))
     msgHandler.start()
     print('Handler started')
-
-    if DEV_MODE:
-      for i in range(len(peers)):
-        peers[i]["ipaddr"] = "127.0.0.1"
 
     addresses_to_send = []
     for peer in peers:

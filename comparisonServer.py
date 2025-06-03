@@ -36,12 +36,7 @@ def startPeers(peerList, nMsgs):
 	peerNumber = 0
 	for peer in peerList:
 		clientSock = socket(AF_INET, SOCK_STREAM)
-
-		if not DEV_MODE:
-			clientSock.connect((peer["ipaddr"], peer["tcp_port"]))
-		else:
-			clientSock.connect(('127.0.0.1', peer["tcp_port"]))
-
+		clientSock.connect((peer["ipaddr"], peer["tcp_port"]))
 		msg = (peerNumber,  nMsgs)
 		msgPack = pickle.dumps(msg)
 		clientSock.send(msgPack)
