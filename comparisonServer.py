@@ -5,7 +5,7 @@ import time
 import sys
 
 serverSock = socket(AF_INET, SOCK_STREAM)
-serverSock.bind(('0.0.0.0', SERVER_PORT))
+serverSock.bind(('0.0.0.0', COMPARISON_SERVER_PORT))
 serverSock.listen(6)
 
 def main():
