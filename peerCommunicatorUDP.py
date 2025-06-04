@@ -58,7 +58,7 @@ def getListOfPeers():
   clientSock = socket(AF_INET, SOCK_STREAM)
   print ('Connecting to group manager: ', (GROUPMNGR_ADDR,GROUPMNGR_TCP_PORT))
   clientSock.connect((GROUPMNGR_ADDR,GROUPMNGR_TCP_PORT))
-  req = {"op":"list"}
+  req = {"op": "list"}
   msg = pickle.dumps(req)
   clientSock.send(msg)
   msg = clientSock.recv(2048)
@@ -93,7 +93,7 @@ class MsgHandler(threading.Thread):
       msgPack = self.sock.recv(1024)
       msg = pickle.loads(msgPack)
       #print ('########## unpickled msgPack: ', msg)
-      if msg[0] == 'READY':
+      if msg['op'] == 'READY':
 
         # To do: send reply of handshake and wait for confirmation
 
@@ -107,26 +107,30 @@ class MsgHandler(threading.Thread):
       if stopCount == self.number_of_peers:
         break  # stop loop when all other processes have finished
 
-      msgPack = self.sock.recv(1024)   # receive data from client
-      msg = pickle.loads(msgPack)
+      received_message = pickle.loads(self.sock.recv(1024))
       clock += 1
 
-      print(msg)
+      print(received_message)
 
-      if msg[0] == 'END':   # count the 'stop' messages from the other processes
+      if received_message['op'] == 'END':   # count the 'stop' messages from the other processes
         stopCount += 1
         continue
 
-      if msg[0] == 'ACK':
+      if received_message['op'] == 'ACK':
         print("ACK received")
 
-      if msg[0] == 'DATA':
-        logList.append(msg)
-        msg = ('ACK', my_id, msg[2], msg[1], clock)
-        msgPack = pickle.dumps(msg)
-        
+      if received_message['op'] == 'DATA':
+        logList.append(received_message)
+        ack_message = {
+          'op': 'ACK',
+          'source_id': received_message['source_id'],
+          'message_id': received_message['message_id'],
+          'destination_id': my_id,
+          'time_stamp': clock
+        }
+
         for addr in addresses_to_send:
-          sendSocket.sendto(msgPack, addr)
+          sendSocket.sendto(pickle.dumps(ack_message), addr)
         
     # Write log file
     logFile = open('logfile'+str(self.my_self)+'.log', 'w')
@@ -205,7 +209,10 @@ def main():
     #        Send confirmation of reply
     for addr in addresses_to_send:
       print('Sending handshake to ', addr)
-      msg = ('READY', my_id)
+      msg = {
+        'op': 'READY',
+        'source_id':  my_id
+      }
       msgPack = pickle.dumps(msg)
       sendSocket.sendto(msgPack, addr)
       #data = recvSocket.recvfrom(128) # Handshadke confirmations have not yet been implemented
@@ -219,7 +226,12 @@ def main():
     for msgNumber in range(0, nMsgs):
       # Wait some random time between successive messages
       time.sleep(random.randrange(10, 100) / 1000)
-      msg = ('DATA', my_id, msgNumber, clock)
+      msg = {
+        'op': 'DATA',
+        'source_id': my_id,
+        'message_id': msgNumber,
+        'time_stamp': clock
+      }
       msgPack = pickle.dumps(msg)
       clock += 1
 
@@ -229,7 +241,7 @@ def main():
 
     # Tell all processes that I have no more messages to send
     for addr in addresses_to_send:
-      msg = ('END',)
+      msg = {'op': 'END'}
       msgPack = pickle.dumps(msg)
       sendSocket.sendto(msgPack, addr)
 
