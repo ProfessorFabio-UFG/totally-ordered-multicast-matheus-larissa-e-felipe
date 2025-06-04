@@ -10,6 +10,8 @@ from requests import get
 
 handShakeCount = 0 # Counter to make sure we have received handshakes from all other processes
 clock = 0  # Process logic clock
+addresses_to_send = [] # Other peers
+my_id = None
 
 def get_socket(protocol):
   if protocol == "tcp":
@@ -21,7 +23,11 @@ def get_socket(protocol):
 
   s = socket(AF_INET, p)
   # Bind to port 0 to let the OS assign an available port
-  s.bind(('127.0.0.1', 0))
+  s.bind(('0.0.0.0', 0))
+
+  if protocol == "tcp":
+    s.listen(1)
+
   return s
 
 def get_public_ip():
@@ -73,7 +79,13 @@ class MsgHandler(threading.Thread):
 
     global handShakeCount
     global clock
+    global addresses_to_send
+    global my_id
     logList = []
+
+    # UDP sockets to send and receive data messages:
+    # Create send socket
+    sendSocket = socket(AF_INET, SOCK_DGRAM)
     
     # Wait until handshakes are received from all other processes
     # (to make sure that all processes are synchronized before they start exchanging messages)
@@ -99,11 +111,22 @@ class MsgHandler(threading.Thread):
       msg = pickle.loads(msgPack)
       clock += 1
 
+      print(msg)
+
       if msg[0] == 'END':   # count the 'stop' messages from the other processes
         stopCount += 1
-      else:
-        print('Message ' + str(msg[1]) + ' from process ' + str(msg[0]))
+        continue
+
+      if msg[0] == 'ACK':
+        print("ACK received")
+
+      if msg[0] == 'DATA':
         logList.append(msg)
+        msg = ('ACK', my_id, msg[2], msg[1], clock)
+        msgPack = pickle.dumps(msg)
+        
+        for addr in addresses_to_send:
+          sendSocket.sendto(msgPack, addr)
         
     # Write log file
     logFile = open('logfile'+str(self.my_self)+'.log', 'w')
@@ -138,9 +161,13 @@ def peer_to_addr(peer):
   return (peer["ipaddr"], peer["udp_port"])
 
 def main():
+  global handShakeCount
+  global clock
+  global addresses_to_send
+  global my_id
+
   # TCP socket to receive start signal from the comparison server:
   tcp_socket = get_socket("tcp")
-  tcp_socket.listen(1)
 
   # Create and bind receive socket
   udp_socket = get_socket("udp")
@@ -163,17 +190,11 @@ def main():
 
     peers = getListOfPeers()
 
-    global handShakeCount
-    global clock
-
-    # Create receiving message handler
-    msgHandler = MsgHandler(udp_socket, my_id, len(peers))
-    msgHandler.start()
-    print('Handler started')
-
-    addresses_to_send = []
     for peer in peers:
       addresses_to_send.append(peer_to_addr(peer))
+
+    # Create receiving message handler
+    MsgHandler(udp_socket, my_id, len(peers)).start()
 
     # UDP sockets to send and receive data messages:
     # Create send socket
@@ -198,7 +219,7 @@ def main():
     for msgNumber in range(0, nMsgs):
       # Wait some random time between successive messages
       time.sleep(random.randrange(10, 100) / 1000)
-      msg = (my_id, msgNumber, clock)
+      msg = ('DATA', my_id, msgNumber, clock)
       msgPack = pickle.dumps(msg)
       clock += 1
 
