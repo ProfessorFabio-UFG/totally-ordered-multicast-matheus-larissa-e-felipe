@@ -1,9 +1,8 @@
-from socket  import *
-from constMP import * #-
+from constMP import *
+from my_socket import *
 import threading
 import random
 import time
-import pickle
 from requests import get
 
 #handShakes = [] # not used; only if we need to check whose handshake is missing
@@ -12,23 +11,9 @@ handShakeCount = 0 # Counter to make sure we have received handshakes from all o
 clock = 0  # Process logic clock
 addresses_to_send = [] # Other peers
 my_id = None
+grp_mng_addr = (GROUPMNGR_ADDR, GROUPMNGR_TCP_PORT)
+comp_server_addr = (COMPARISON_SERVER_ADDR, COMPARISON_SERVER_PORT)
 
-def get_socket(protocol):
-  if protocol == "tcp":
-    p = SOCK_STREAM
-  elif protocol == "udp":
-    p = SOCK_DGRAM
-  else:
-    raise Exception("Protocol must be tcp or udp")
-
-  s = socket(AF_INET, p)
-  # Bind to port 0 to let the OS assign an available port
-  s.bind(('0.0.0.0', 0))
-
-  if protocol == "tcp":
-    s.listen(1)
-
-  return s
 
 def get_public_ip():
   ipAddr = get('https://api.ipify.org').content.decode('utf8')
@@ -37,42 +22,37 @@ def get_public_ip():
 
 # Function to register this peer with the group manager
 def registerWithGroupManager(tcp_socket, udp_socket):
-  clientSock = socket(AF_INET, SOCK_STREAM)
-  print('Connecting to group manager: ', (GROUPMNGR_ADDR, GROUPMNGR_TCP_PORT))
-  clientSock.connect((GROUPMNGR_ADDR, GROUPMNGR_TCP_PORT))
+  clientSock = MySocket("tcp")
+  print('Connecting to group manager: ', grp_mng_addr)
+  clientSock.connect(grp_mng_addr)
   ipaddr = get_public_ip() if not DEV_MODE else "127.0.0.1"
 
   req = {
     "op": "register",
     "ipaddr": ipaddr,
-    "tcp_port": tcp_socket.getsockname()[1],
-    "udp_port": udp_socket.getsockname()[1],
+    "tcp_port": tcp_socket.get_port(),
+    "udp_port": udp_socket.get_port(),
   }
 
-  msg = pickle.dumps(req)
-  print ('Registering with group manager: ', req)
-  clientSock.send(msg)
+  print ('Registering with group manager')
+  clientSock.send(req)
   clientSock.close()
 
 def getListOfPeers():
-  clientSock = socket(AF_INET, SOCK_STREAM)
-  print ('Connecting to group manager: ', (GROUPMNGR_ADDR,GROUPMNGR_TCP_PORT))
-  clientSock.connect((GROUPMNGR_ADDR,GROUPMNGR_TCP_PORT))
+  clientSock = MySocket('tcp')
+  print ('Connecting to group manager: ', grp_mng_addr)
+  clientSock.connect(grp_mng_addr)
   req = {"op": "list"}
-  msg = pickle.dumps(req)
-  clientSock.send(msg)
-  msg = clientSock.recv(2048)
-  peers = pickle.loads(msg)
+  clientSock.send(req)
+  peers = clientSock.read(2048)
   print ('Got list of peers: ', peers)
   clientSock.close()
   return peers
 
 class MsgHandler(threading.Thread):
-  def __init__(self, sock, my_self, number_of_peers):
+  def __init__(self, sock):
     threading.Thread.__init__(self)
     self.sock = sock
-    self.my_self = my_self
-    self.number_of_peers = number_of_peers
 
   def run(self):
     print('Handler is ready. Waiting for the handshakes...')
@@ -85,14 +65,14 @@ class MsgHandler(threading.Thread):
 
     # UDP sockets to send and receive data messages:
     # Create send socket
-    sendSocket = socket(AF_INET, SOCK_DGRAM)
+    sendSocket = MySocket("udp")
     
     # Wait until handshakes are received from all other processes
     # (to make sure that all processes are synchronized before they start exchanging messages)
-    while handShakeCount < self.number_of_peers:
-      msgPack = self.sock.recv(1024)
-      msg = pickle.loads(msgPack)
+    while handShakeCount < len(addresses_to_send):
+      msg = self.sock.read()
       #print ('########## unpickled msgPack: ', msg)
+
       if msg['op'] == 'READY':
 
         # To do: send reply of handshake and wait for confirmation
@@ -100,24 +80,24 @@ class MsgHandler(threading.Thread):
         handShakeCount = handShakeCount + 1
         #handShakes[msg[1]] = 1
 
-    print('Secondary Thread: Received all handshakes. Entering the loop to receive messages.')
+    print('Received all handshakes. Entering the loop to receive messages.')
 
     stopCount=0 
     while True:
-      if stopCount == self.number_of_peers:
+      if stopCount == len(addresses_to_send):
         break  # stop loop when all other processes have finished
 
-      received_message = pickle.loads(self.sock.recv(1024))
+      received_message = self.sock.read()
       clock += 1
 
-      print(received_message)
+      #print(received_message)
 
       if received_message['op'] == 'END':   # count the 'stop' messages from the other processes
         stopCount += 1
         continue
 
-      if received_message['op'] == 'ACK':
-        print("ACK received")
+      #if received_message['op'] == 'ACK':
+        #print("ACK received")
 
       if received_message['op'] == 'DATA':
         logList.append(received_message)
@@ -130,19 +110,18 @@ class MsgHandler(threading.Thread):
         }
 
         for addr in addresses_to_send:
-          sendSocket.sendto(pickle.dumps(ack_message), addr)
+          sendSocket.send_to(ack_message, addr)
         
     # Write log file
-    logFile = open('logfile'+str(self.my_self)+'.log', 'w')
+    logFile = open('logfile'+str(my_id)+'.log', 'w')
     logFile.writelines(str(logList))
     logFile.close()
     
     # Send the list of messages to the server (using a TCP socket) for comparison
     print('Sending the list of messages to the server for comparison...')
-    clientSock = socket(AF_INET, SOCK_STREAM)
-    clientSock.connect((COMPARISON_SERVER_ADDR, COMPARISON_SERVER_PORT))
-    msgPack = pickle.dumps(logList)
-    clientSock.send(msgPack)
+    clientSock = MySocket("tcp")
+    clientSock.connect(comp_server_addr)
+    clientSock.send(logList)
     clientSock.close()
     
     # Reset the handshake counter
@@ -152,14 +131,11 @@ class MsgHandler(threading.Thread):
 
 # Function to wait for start signal from comparison server:
 def waitToStart(serverSock):
-  (conn, addr) = serverSock.accept()
-  msgPack = conn.recv(1024)
-  msg = pickle.loads(msgPack)
-  my_id = msg[0]
-  nMsgs = msg[1]
-  conn.send(pickle.dumps('Peer process '+str(my_id)+' started.'))
-  conn.close()
-  return (my_id, nMsgs)
+  serverSock.accept()
+  msg = serverSock.read()
+  serverSock.send(msg)
+  serverSock.close()
+  return (msg['id'], msg['nMsgs'])
 
 def peer_to_addr(peer):
   return (peer["ipaddr"], peer["udp_port"])
@@ -171,10 +147,10 @@ def main():
   global my_id
 
   # TCP socket to receive start signal from the comparison server:
-  tcp_socket = get_socket("tcp")
+  tcp_socket = new_socket("tcp")
 
   # Create and bind receive socket
-  udp_socket = get_socket("udp")
+  udp_socket = new_socket("udp")
 
   registerWithGroupManager(tcp_socket, udp_socket)
 
@@ -198,11 +174,11 @@ def main():
       addresses_to_send.append(peer_to_addr(peer))
 
     # Create receiving message handler
-    MsgHandler(udp_socket, my_id, len(peers)).start()
+    MsgHandler(udp_socket).start()
 
     # UDP sockets to send and receive data messages:
     # Create send socket
-    sendSocket = socket(AF_INET, SOCK_DGRAM)
+    sendSocket = MySocket("udp")
     
     # Send handshakes
     # To do: Must continue sending until it gets a reply from each process
@@ -213,11 +189,10 @@ def main():
         'op': 'READY',
         'source_id':  my_id
       }
-      msgPack = pickle.dumps(msg)
-      sendSocket.sendto(msgPack, addr)
+      sendSocket.send_to(msg, addr)
       #data = recvSocket.recvfrom(128) # Handshadke confirmations have not yet been implemented
 
-    print('Main Thread: Sent all handshakes. handShakeCount=', str(handShakeCount))
+    print('Sent all handshakes. handShakeCount=', str(handShakeCount))
 
     while (handShakeCount < len(peers)):
       pass  # find a better way to wait for the handshakes
@@ -226,24 +201,22 @@ def main():
     for msgNumber in range(0, nMsgs):
       # Wait some random time between successive messages
       time.sleep(random.randrange(10, 100) / 1000)
+
       msg = {
         'op': 'DATA',
         'source_id': my_id,
         'message_id': msgNumber,
         'time_stamp': clock
       }
-      msgPack = pickle.dumps(msg)
       clock += 1
 
       for addr in addresses_to_send:
-        sendSocket.sendto(msgPack, addr)
-        print('Sent message ' + str(msgNumber))
+        sendSocket.send_to(msg, addr)
 
     # Tell all processes that I have no more messages to send
     for addr in addresses_to_send:
       msg = {'op': 'END'}
-      msgPack = pickle.dumps(msg)
-      sendSocket.sendto(msgPack, addr)
+      sendSocket.send_to(msg, addr)
 
     print(f"MY CLOCK {clock}")
 
