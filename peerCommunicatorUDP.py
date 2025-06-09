@@ -1,18 +1,38 @@
-from constMP import *
-from my_socket import *
+from socket  import *
+from constMP import * #-
 import threading
 import random
 import time
+import pickle
 from requests import get
+import heapq
 
 #handShakes = [] # not used; only if we need to check whose handshake is missing
 
-handShakeCount = 0 # Counter to make sure we have received handshakes from all other processes
-clock = 0  # Process logic clock
-addresses_to_send = [] # Other peers
-my_id = None
-grp_mng_addr = (GROUPMNGR_ADDR, GROUPMNGR_TCP_PORT)
-comp_server_addr = (COMPARISON_SERVER_ADDR, COMPARISON_SERVER_PORT)
+# Counter to make sure we have received handshakes from all other processes
+handShakeCount = 0
+
+PEERS = []
+
+# Variável global para o relógio de Lamport
+lamport_clock = 0
+# Fila de prioridade para armazenar mensagens recebidas
+# Os elementos serão tuplas: (timestamp, ID_remetente, número_mensagem)
+message_queue = []
+# Lock para proteger o acesso ao relógio de Lamport e à fila de mensagens
+clock_and_queue_lock = threading.Lock()
+
+# UDP sockets to send and receive data messages:
+# Create send socket
+sendSocket = socket(AF_INET, SOCK_DGRAM)
+#Create and bind receive socket
+recvSocket = socket(AF_INET, SOCK_DGRAM)
+recvSocket.bind(('0.0.0.0', PEER_UDP_PORT))
+
+# TCP socket to receive start signal from the comparison server:
+serverSock = socket(AF_INET, SOCK_STREAM)
+serverSock.bind(('0.0.0.0', PEER_TCP_PORT))
+serverSock.listen(1)
 
 
 def get_public_ip():
@@ -21,33 +41,30 @@ def get_public_ip():
   return ipAddr
 
 # Function to register this peer with the group manager
-def registerWithGroupManager(tcp_socket, udp_socket):
-  clientSock = MySocket("tcp")
-  print('Connecting to group manager: ', grp_mng_addr)
-  clientSock.connect(grp_mng_addr)
-  ipaddr = get_public_ip() if not DEV_MODE else "127.0.0.1"
-
-  req = {
-    "op": "register",
-    "ipaddr": ipaddr,
-    "tcp_port": tcp_socket.get_port(),
-    "udp_port": udp_socket.get_port(),
-  }
-
-  print ('Registering with group manager')
-  clientSock.send(req)
+def registerWithGroupManager():
+  clientSock = socket(AF_INET, SOCK_STREAM)
+  print ('Connecting to group manager: ', (GROUPMNGR_ADDR,GROUPMNGR_TCP_PORT))
+  clientSock.connect((GROUPMNGR_ADDR,GROUPMNGR_TCP_PORT))
+  ipAddr = get_public_ip()
+  req = {"op":"register", "ipaddr":ipAddr, "port":PEER_UDP_PORT}
+  msg = pickle.dumps(req)
+  print ('Registering with group manager: ', req)
+  clientSock.send(msg)
   clientSock.close()
 
 def getListOfPeers():
-  clientSock = MySocket('tcp')
-  print ('Connecting to group manager: ', grp_mng_addr)
-  clientSock.connect(grp_mng_addr)
-  req = {"op": "list"}
-  clientSock.send(req)
-  peers = clientSock.read(2048)
-  print ('Got list of peers: ', peers)
+  clientSock = socket(AF_INET, SOCK_STREAM)
+  print ('Connecting to group manager: ', (GROUPMNGR_ADDR,GROUPMNGR_TCP_PORT))
+  clientSock.connect((GROUPMNGR_ADDR,GROUPMNGR_TCP_PORT))
+  req = {"op":"list"}
+  msg = pickle.dumps(req)
+  print ('Getting list of peers from group manager: ', req)
+  clientSock.send(msg)
+  msg = clientSock.recv(2048)
+  PEERS = pickle.loads(msg)
+  print ('Got list of peers: ', PEERS)
   clientSock.close()
-  return peers
+  return PEERS
 
 class MsgHandler(threading.Thread):
   def __init__(self, sock):
@@ -56,72 +73,72 @@ class MsgHandler(threading.Thread):
 
   def run(self):
     print('Handler is ready. Waiting for the handshakes...')
-
+    
+    #global handShakes
     global handShakeCount
-    global clock
-    global addresses_to_send
-    global my_id
+    global lamport_clock # Acessa o relógio de Lamport
+    
     logList = []
-
-    # UDP sockets to send and receive data messages:
-    # Create send socket
-    sendSocket = MySocket("udp")
     
     # Wait until handshakes are received from all other processes
     # (to make sure that all processes are synchronized before they start exchanging messages)
-    while handShakeCount < len(addresses_to_send):
-      msg = self.sock.read()
+    while handShakeCount < N:
+      msgPack = self.sock.recv(1024)
+      msg = pickle.loads(msgPack)
       #print ('########## unpickled msgPack: ', msg)
-
-      if msg['op'] == 'READY':
-
+      if msg[0] == 'READY':
+        # Atualiza o relógio de Lamport ao receber um handshake
+        with clock_and_queue_lock:
+          lamport_clock = max(lamport_clock, msg[2]) + 1 # msg[2] será o timestamp do handshake
         # To do: send reply of handshake and wait for confirmation
 
         handShakeCount = handShakeCount + 1
         #handShakes[msg[1]] = 1
+        print('--- Handshake received: ', msg[1])
 
-    print('Received all handshakes. Entering the loop to receive messages.')
+    print('Secondary Thread: Received all handshakes. Entering the loop to receive messages.')
 
     stopCount=0 
-    while True:
-      if stopCount == len(addresses_to_send):
-        break  # stop loop when all other processes have finished
+    
+    while True:                
+      msgPack = self.sock.recv(1024)   # receive data from client
+      msg = pickle.loads(msgPack)
+      
+      if msg[0] == -1:   # count the 'stop' messages from the other processes
+        stopCount = stopCount + 1
+        if stopCount == N:
+          break  # stop loop when all other processes have finished
+      else:
+        # msg[0]: ID do remetente, msg[1]: número da mensagem, msg[2]: timestamp de Lamport
+        sender_id, msg_number, msg_timestamp = msg[0], msg[1], msg[2]
+                
+        with clock_and_queue_lock:
+          # Atualiza o relógio de Lamport
+          lamport_clock = max(lamport_clock, msg_timestamp) + 1
+          # Adiciona a mensagem à fila de prioridade
+          # Usamos o timestamp como prioridade principal e o ID do remetente como desempate
+          heapq.heappush(message_queue, (msg_timestamp, sender_id, msg_number))
+                
+        print(f'Received message (LC: {msg_timestamp}): {msg_number} from process {sender_id}. Queue size: {len(message_queue)}')
+      
+      # Tenta entregar as mensagens ordenadamente
+      self.deliver_ordered_messages(logList)
+    
+    # Garante que todas as mensagens na fila sejam entregues antes de finalizar
+    while message_queue:
+      self.deliver_ordered_messages(logList)
 
-      received_message = self.sock.read()
-      clock += 1
-
-      #print(received_message)
-
-      if received_message['op'] == 'END':   # count the 'stop' messages from the other processes
-        stopCount += 1
-        continue
-
-      #if received_message['op'] == 'ACK':
-        #print("ACK received")
-
-      if received_message['op'] == 'DATA':
-        logList.append(received_message)
-        ack_message = {
-          'op': 'ACK',
-          'source_id': received_message['source_id'],
-          'message_id': received_message['message_id'],
-          'destination_id': my_id,
-          'time_stamp': clock
-        }
-
-        for addr in addresses_to_send:
-          sendSocket.send_to(ack_message, addr)
-        
     # Write log file
-    logFile = open('logfile'+str(my_id)+'.log', 'w')
+    logFile = open('logfile'+str(myself)+'.log', 'w')
     logFile.writelines(str(logList))
     logFile.close()
     
     # Send the list of messages to the server (using a TCP socket) for comparison
     print('Sending the list of messages to the server for comparison...')
-    clientSock = MySocket("tcp")
-    clientSock.connect(comp_server_addr)
-    clientSock.send(logList)
+    clientSock = socket(AF_INET, SOCK_STREAM)
+    clientSock.connect((SERVER_ADDR, SERVER_PORT))
+    msgPack = pickle.dumps(logList)
+    clientSock.send(msgPack)
     clientSock.close()
     
     # Reset the handshake counter
@@ -129,95 +146,89 @@ class MsgHandler(threading.Thread):
 
     exit(0)
 
-# Function to wait for start signal from comparison server:
-def waitToStart(serverSock):
-  serverSock.accept()
-  msg = serverSock.read()
-  serverSock.send(msg)
-  serverSock.close()
-  return (msg['id'], msg['nMsgs'])
+  def deliver_ordered_messages(self, logList):
+    global lamport_clock
+    global N # N é o número total de peers
 
-def peer_to_addr(peer):
-  return (peer["ipaddr"], peer["udp_port"])
-
-def main():
-  global handShakeCount
-  global clock
-  global addresses_to_send
-  global my_id
-
-  # TCP socket to receive start signal from the comparison server:
-  tcp_socket = new_socket("tcp")
-
-  # Create and bind receive socket
-  udp_socket = new_socket("udp")
-
-  registerWithGroupManager(tcp_socket, udp_socket)
-
-  while True:
-    print('Waiting for signal to start...')
-    (my_id, nMsgs) = waitToStart(tcp_socket)
-    print('I am up, and my ID is: ', str(my_id))
-
-    if nMsgs == 0:
-      print('Terminating.')
-      exit(0)
-
-    # Wait for other processes to be ready
-    # To Do: fix bug that causes a failure when not all processes are started within this time
-    # (fully started processes start sending data messages, which the others try to interpret as control messages) 
-    time.sleep(5)
-
-    peers = getListOfPeers()
-
-    for peer in peers:
-      addresses_to_send.append(peer_to_addr(peer))
-
-    # Create receiving message handler
-    MsgHandler(udp_socket).start()
-
-    # UDP sockets to send and receive data messages:
-    # Create send socket
-    sendSocket = MySocket("udp")
+    while message_queue:
+      # Pega a mensagem com o menor timestamp da fila (não remove ainda)
+      next_msg_timestamp, next_msg_sender_id, next_msg_number = message_queue[0]
     
-    # Send handshakes
-    # To do: Must continue sending until it gets a reply from each process
-    #        Send confirmation of reply
-    for addr in addresses_to_send:
-      print('Sending handshake to ', addr)
-      msg = {
-        'op': 'READY',
-        'source_id':  my_id
-      }
-      sendSocket.send_to(msg, addr)
-      #data = recvSocket.recvfrom(128) # Handshadke confirmations have not yet been implemented
+      with clock_and_queue_lock:
+        popped_msg = heapq.heappop(message_queue)
 
-    print('Sent all handshakes. handShakeCount=', str(handShakeCount))
+      logList.append((popped_msg[1], popped_msg[2])) # Armazena (ID_remetente, número_mensagem)
+      print(f'DELIVERED: Message {popped_msg[2]} from process {popped_msg[1]} (LC: {popped_msg[0]})')
 
-    while (handShakeCount < len(peers)):
-      pass  # find a better way to wait for the handshakes
+# Function to wait for start signal from comparison server:
+def waitToStart():
+  (conn, addr) = serverSock.accept()
+  msgPack = conn.recv(1024)
+  msg = pickle.loads(msgPack)
+  myself = msg[0]
+  nMsgs = msg[1]
+  conn.send(pickle.dumps('Peer process '+str(myself)+' started.'))
+  conn.close()
+  return (myself,nMsgs)
 
-    # Send a sequence of data messages to all other processes 
-    for msgNumber in range(0, nMsgs):
-      # Wait some random time between successive messages
-      time.sleep(random.randrange(10, 100) / 1000)
+# From here, code is executed when program starts:
+registerWithGroupManager()
+while 1:
+  print('Waiting for signal to start...')
+  (myself, nMsgs) = waitToStart()
+  print('I am up, and my ID is: ', str(myself))
 
-      msg = {
-        'op': 'DATA',
-        'source_id': my_id,
-        'message_id': msgNumber,
-        'time_stamp': clock
-      }
-      clock += 1
+  if nMsgs == 0:
+    print('Terminating.')
+    exit(0)
 
-      for addr in addresses_to_send:
-        sendSocket.send_to(msg, addr)
+  # Wait for other processes to be ready
+  # To Do: fix bug that causes a failure when not all processes are started within this time
+  # (fully started processes start sending data messages, which the others try to interpret as control messages) 
+  time.sleep(5)
 
-    # Tell all processes that I have no more messages to send
-    for addr in addresses_to_send:
-      msg = {'op': 'END'}
-      sendSocket.send_to(msg, addr)
+  # Create receiving message handler
+  msgHandler = MsgHandler(recvSocket)
+  msgHandler.start()
+  print('Handler started')
 
-    print(f"MY CLOCK {clock}")
+  PEERS = getListOfPeers()
+  
+  # Send handshakes
+  # To do: Must continue sending until it gets a reply from each process
+  #        Send confirmation of reply
+  for addrToSend in PEERS:
+    print('Sending handshake to ', addrToSend)
+    with clock_and_queue_lock:
+      lamport_clock += 1 # Incrementa o relógio antes de enviar
+      msg = ('READY', myself, lamport_clock) # Inclui o timestamp de Lamport
+    msgPack = pickle.dumps(msg)
+    sendSocket.sendto(msgPack, (addrToSend,PEER_UDP_PORT))
+    #data = recvSocket.recvfrom(128) # Handshadke confirmations have not yet been implemented
 
-main()
+  print('Main Thread: Sent all handshakes. handShakeCount=', str(handShakeCount))
+
+  while (handShakeCount < N):
+    pass  # find a better way to wait for the handshakes
+
+  # Send a sequence of data messages to all other processes 
+  for msgNumber in range(0, nMsgs):
+    # Wait some random time between successive messages
+    time.sleep(random.randrange(10,100)/1000)
+    with clock_and_queue_lock:
+      lamport_clock += 1 # Incrementa o relógio antes de enviar
+      msg = (myself, msgNumber, lamport_clock) # Inclui o timestamp de Lamport
+        
+    msgPack = pickle.dumps(msg)
+    for addrToSend in PEERS:
+      sendSocket.sendto(msgPack, (addrToSend,PEER_UDP_PORT))
+      print(f'Sent message {msgNumber} (LC: {lamport_clock})')
+
+  # Tell all processes that I have no more messages to send
+  for addrToSend in PEERS:
+    with clock_and_queue_lock:
+      lamport_clock += 1 # Incrementa o relógio ao enviar a mensagem de parada
+      msg = (-1,-1, lamport_clock) # Inclui o timestamp de Lamport
+
+    msgPack = pickle.dumps(msg)
+    sendSocket.sendto(msgPack, (addrToSend,PEER_UDP_PORT))
